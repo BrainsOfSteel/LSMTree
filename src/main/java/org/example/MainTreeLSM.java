@@ -12,18 +12,18 @@ import java.util.zip.CRC32;
 
 @Component
 public class MainTreeLSM {
-    private ConcurrentSkipListMap<Integer, Integer> mainMemory = new ConcurrentSkipListMap<>();
-    private ConcurrentSkipListMap<Integer, Integer> secondaryMemory = new ConcurrentSkipListMap<>();
+    private ConcurrentSkipListMap<Integer, Container> mainMemory = new ConcurrentSkipListMap<>();
+    private ConcurrentSkipListMap<Integer, Container> secondaryMemory = new ConcurrentSkipListMap<>();
     private ReentrantReadWriteLock sstDumpLock = new ReentrantReadWriteLock();
 
     public void putData(int key, int value) {
         if (!sstDumpLock.readLock().tryLock()) {
-            secondaryMemory.put(key, value);
+            secondaryMemory.put(key, new Container(System.currentTimeMillis(), value));
         }
         else {
             try {
                 //To protect multiple updates from other threads to map1
-                mainMemory.put(key, value);
+                mainMemory.put(key, new Container(System.currentTimeMillis(), value));
             } catch (Exception e) {
                 e.printStackTrace();
             } finally {
@@ -32,7 +32,7 @@ public class MainTreeLSM {
         }
     }
 
-    public void compaction() throws InterruptedException {
+    public void createSstFile() throws InterruptedException {
         try{
             sstDumpLock.writeLock().lock();
             dumpToFile();
@@ -49,10 +49,10 @@ public class MainTreeLSM {
 
     public Integer searchKey(int key){
         if(mainMemory.containsKey(key)){
-            return mainMemory.get(key);
+            return mainMemory.get(key).getValue();
         }
         if(secondaryMemory.containsKey(key)){
-            return secondaryMemory.get(key);
+            return secondaryMemory.get(key).getValue();
         }
 
         return searchKeyInFiles(key);
@@ -103,10 +103,12 @@ public class MainTreeLSM {
         String fileName = Util.SST_TABLE_DIRECTORY+"/" + Util.SST_TABLE_PREFIX+System.currentTimeMillis();
         CRC32 crc32 = new CRC32();
         try(BufferedWriter fileWriter = new BufferedWriter(new FileWriter(fileName))) {
-            for (Map.Entry<Integer, Integer> entry : mainMemory.entrySet()) {
+            for (Map.Entry<Integer, Container> entry : mainMemory.entrySet()) {
                 int keySize = Integer.toString(entry.getKey()).length();
-                int valueSize = Integer.toString(entry.getValue()).length();
-                String line = keySize + "," + entry.getKey() + "," + valueSize + "," + entry.getValue()+"\n";
+                int valueSize = Integer.toString(entry.getValue().getValue()).length();
+                int timestampSize = Long.toString(entry.getValue().getTimestamp()).length();
+                String line = keySize + "," + entry.getKey() + "," + valueSize + "," + entry.getValue().getValue()
+                        +","+timestampSize+"," + entry.getValue().getTimestamp()+ "\n";
                 crc32.update(line.getBytes());
                 long crc = crc32.getValue();
                 crc32.reset();
@@ -132,20 +134,46 @@ public class MainTreeLSM {
                 tempLocks.putData(i, i+1);
             }
         });
-        Thread compacter = new Thread(()->{
+        Thread compacter1 = new Thread(()->{
             try {
-                tempLocks.compaction();
+                tempLocks.createSstFile();
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
         });
 
+        Thread compacter2 = new Thread(()->{
+            try {
+                tempLocks.createSstFile();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        });
+
+        Thread normalThread3 = new Thread(() -> {
+            for(int i =2001;i<3001;i++){
+                tempLocks.putData(i, i+1);
+            }
+        });
+
+        Thread normalThread4 = new Thread(() -> {
+            for(int i =3001;i<4001;i++){
+                tempLocks.putData(i, i+1);
+            }
+        });
+
         normalThread1.start();
         normalThread2.start();
-        compacter.start();
+        normalThread3.start();
+        normalThread4.start();
+        compacter1.start();
+        compacter2.start();
         normalThread1.join();
         normalThread2.join();
-        compacter.join();
-        tempLocks.compaction();
+        normalThread3.join();
+        normalThread4.join();
+        compacter2.join();
+        compacter1.join();
+        tempLocks.createSstFile();
     }
 }
